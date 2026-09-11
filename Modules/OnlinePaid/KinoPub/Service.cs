@@ -100,10 +100,16 @@ public class KinoPubInvoke
     #endregion
 
     #region Tpl
-    public ITplResult Tpl(RootObject root, string filetype, string title, string original_title, int postid, short s = -1, int t = -1, string codec = null, VastConf vast = null, bool rjson = false)
+    public ITplResult Tpl(RootObject root, string filetype, string title, string original_title, int postid, short s = -1, int t = -1, string codec = null, string lang = null, VastConf vast = null, bool rjson = false)
     {
         if (root == null)
             return default;
+
+        if (string.IsNullOrEmpty(codec))
+            codec = null;
+
+        if (string.IsNullOrEmpty(lang))
+            lang = null;
 
         if (root?.item.videos != null)
         {
@@ -282,93 +288,94 @@ public class KinoPubInvoke
                 #region Серии
                 if (filetype == "hls")
                 {
+                    var season = root.item.seasons.FirstOrDefault(i => i.number == s);
+                    if (season?.episodes == null || season.episodes.Length == 0)
+                        return default;
+
                     #region Перевод
-                    var vtpl = new VoiceTpl();
-                    var hash = new HashSet<string>(20);
+                    // озвучки со всех серий сезона; root закэширован и общий для запросов - только читаем
+                    var voices = new List<KinoPubVoice>(20);
+                    var voicesByKey = new Dictionary<string, KinoPubVoice>(20);
+                    var knownLangs = KnownLangs(season.episodes);
 
-                    foreach (var a in root.item.seasons.First(i => i.number == s).episodes[0].audios)
+                    foreach (var episode in season.episodes)
                     {
-                        string voice = a?.author?.title ?? a?.type?.title;
-
-                        int? idt = a?.author?.id;
-                        if (idt == null)
-                            idt = a?.type?.id ?? null;
-
-                        if (idt == null)
-                        {
-                            if (a.lang == "eng")
-                            {
-                                idt = 6;
-                                voice = "Оригинал";
-                            }
-                            else
-                            {
-                                idt = 1;
-                                voice = "По умолчанию";
-                            }
-                        }
-
-                        if (string.IsNullOrEmpty(voice))
+                        if (episode.audios == null)
                             continue;
 
-                        if (t == -1)
+                        var episodeKeys = new HashSet<string>(20);
+
+                        foreach (var a in episode.audios)
                         {
-                            t = (int)idt;
-                            codec = a.codec;
+                            var (idt, voice) = VoiceId(a);
+                            if (string.IsNullOrEmpty(voice))
+                                continue;
+
+                            string alang = EpisodeLang(a, episode.audios, knownLangs);
+                            string key = VoiceKey(idt, a.codec, alang);
+                            if (!episodeKeys.Add(key))
+                                continue;
+
+                            if (!voicesByKey.TryGetValue(key, out var v))
+                            {
+                                v = new KinoPubVoice(idt, voice, a.codec, alang);
+                                voicesByKey.Add(key, v);
+                                voices.Add(v);
+                            }
+
+                            v.episodes++;
                         }
+                    }
 
-                        if (!hash.Contains($"{voice}:{a.codec}"))
-                        {
-                            hash.Add($"{voice}:{a.codec}");
+                    if (voices.Count == 0)
+                        return default;
 
-                            string link = host + $"lite/kinopub?rjson={rjson}&postid={postid}&title={enc_title}&original_title={enc_original_title}&s={s}&t={idt}&codec={a.codec}";
-                            bool active = t == idt && (codec == null || codec == a.codec);
+                    KinoPubVoice selected = null;
 
-                            vtpl.Append(
-                                $"{voice} ({a.codec})",
-                                active,
-                                link
-                            );
-                        }
+                    if (t != -1)
+                    {
+                        // точное совпадение, затем ссылки без codec/lang
+                        selected = voices.FirstOrDefault(v => v.id == t && v.codec == codec && v.lang == lang)
+                            ?? voices.FirstOrDefault(v => v.id == t && (codec == null || codec == v.codec) && (lang == null || lang == v.lang));
+                    }
+
+                    // по умолчанию озвучка с наибольшим весом, см. DefaultWeight
+                    selected ??= voices.OrderByDescending(DefaultWeight).First();
+
+                    var vtpl = new VoiceTpl(voices.Count);
+                    var names = VoiceNames(voices);
+
+                    for (int i = 0; i < voices.Count; i++)
+                    {
+                        var v = voices[i];
+                        string link = host + $"lite/kinopub?rjson={rjson}&postid={postid}&title={enc_title}&original_title={enc_original_title}&s={s}&t={v.id}&codec={v.codec}&lang={v.lang}";
+
+                        vtpl.Append(
+                            names[i],
+                            v == selected,
+                            link
+                        );
                     }
                     #endregion
 
                     #region Серии
-                    var etpl = new EpisodeTpl(vtpl);
+                    var etpl = new EpisodeTpl(vtpl, season.episodes.Length);
+                    string selectedKey = VoiceKey(selected.id, selected.codec, selected.lang);
 
-                    foreach (var episode in root.item.seasons.First(i => i.number == s).episodes)
+                    foreach (var episode in season.episodes)
                     {
-                        int voice_index = -1;
-                        if (t == 1)
-                        {
-                            voice_index = t;
-                        }
-                        else
-                        {
-                            foreach (var a in episode.audios)
-                            {
-                                int? idt = a?.author?.id;
-                                if (idt == null)
-                                    idt = a?.type?.id;
+                        var audio = episode.audios?.FirstOrDefault(a => VoiceKey(VoiceId(a).id, a.codec, EpisodeLang(a, episode.audios, knownLangs)) == selectedKey);
 
-                                if ((idt != null && t == (int)idt && (codec == null || codec == a.codec)) ||
-                                    (t == 6 && a.lang == "eng"))
-                                {
-                                    voice_index = a!.index;
-                                    break;
-                                }
-                            }
-
-                            if (voice_index == -1)
-                                break;
-                        }
+                        // в серии нет выбранной озвучки - пропускаем только эту серию
+                        if (audio == null)
+                            continue;
 
                         var streamquality = new StreamQualityTpl();
 
                         foreach (var f in episode.files)
                         {
                             if (!string.IsNullOrEmpty(f.url.hls))
-                                streamquality.Append(onstreamfile(f.url.hls.Replace("a1.m3u8", $"a{voice_index}.m3u8"), null), f.quality);
+                                streamquality.Append(onstreamfile(f.url.hls.Replace("a1.m3u8", $"a{audio.index}.m3u8"), null), f.quality);
                         }
 
                         #region subtitle
@@ -506,5 +513,126 @@ public class KinoPubInvoke
             #endregion
         }
     }
+    #endregion
+
+    #region Voice
+    sealed class KinoPubVoice
+    {
+        public KinoPubVoice(int id, string name, string codec, string lang)
+        {
+            this.id = id;
+            this.name = name;
+            this.codec = string.IsNullOrEmpty(codec) ? null : codec;
+            this.lang = string.IsNullOrEmpty(lang) ? null : lang;
+        }
+
+        public int id { get; }
+
+        public string name { get; }
+
+        public string codec { get; }
+
+        public string lang { get; }
+
+        public int episodes { get; set; }
+    }
+
+    // id = author.id ?? type.id; без автора и типа: 6 - оригинал на английском, 0 - по умолчанию
+    static (int id, string name) VoiceId(Audio a)
+    {
+        int? id = a.author?.id ?? a.type?.id;
+        if (id != null)
+            return ((int)id, a.author?.title ?? a.type?.title);
+
+        if (a.lang == "eng")
+            return (6, "Оригинал");
+
+        return (0, "По умолчанию");
+    }
+
+    static string VoiceKey(int id, string codec, string lang)
+        => $"{id}:{codec}:{lang}";
+
+    // число серий с озвучкой: русская x4, без языка x2, aac x2
+    static int DefaultWeight(KinoPubVoice v)
+        => v.episodes * (v.lang == "rus" ? 4 : v.lang == null ? 2 : 1) * (v.codec == "aac" ? 2 : 1);
+
+    static string KnownLang(string lang)
+        => string.IsNullOrEmpty(lang) || lang == "und" || lang == "unk" ? null : lang;
+
+    // известные языки каждой озвучки (id + codec) в сезоне
+    static Dictionary<string, HashSet<string>> KnownLangs(Episode[] episodes)
+    {
+        var result = new Dictionary<string, HashSet<string>>(20);
+
+        foreach (var episode in episodes)
+        {
+            if (episode.audios == null)
+                continue;
+
+            foreach (var a in episode.audios)
+            {
+                string alang = KnownLang(a.lang);
+                if (alang == null)
+                    continue;
+
+                string key = VoiceKey(VoiceId(a).id, a.codec, null);
+                if (!result.TryGetValue(key, out var langs))
+                    result.Add(key, langs = new HashSet<string>());
+
+                langs.Add(alang);
+            }
+        }
+
+        return result;
+    }
+
+    // неизвестный язык (пусто, und, unk) относим к единственному известному языку этой озвучки в сезоне,
+    // если в серии нет её дорожки с языком
+    static string EpisodeLang(Audio a, Audio[] audios, Dictionary<string, HashSet<string>> knownLangs)
+    {
+        string alang = KnownLang(a.lang);
+        if (alang != null)
+            return alang;
+
+        string key = VoiceKey(VoiceId(a).id, a.codec, null);
+
+        if (audios.Any(i => i != a && KnownLang(i.lang) != null && VoiceKey(VoiceId(i).id, i.codec, null) == key))
+            return null;
+
+        return knownLangs.TryGetValue(key, out var langs) && langs.Count == 1 ? langs.First() : null;
+    }
+
+    // язык в названии для нерусских дорожек, кроме английского оригинала;
+    // при совпадении названий его сохраняет озвучка с известным языком и наибольшим числом серий,
+    // остальным добавляется язык (und, если неизвестен), затем id
+    static string[] VoiceNames(List<KinoPubVoice> voices)
+    {
+        var names = voices.Select(v => VoiceName(v, v.lang == "rus" || (v.id == 6 && v.lang == "eng") ? null : v.lang)).ToArray();
+
+        for (int pass = 0; pass < 2; pass++)
+        {
+            var duplicates = Enumerable.Range(0, names.Length)
+                .GroupBy(i => names[i])
+                .Where(g => g.Count() > 1)
+                .ToList();
+
+            foreach (var group in duplicates)
+            {
+                int main = group.OrderBy(i => voices[i].lang == null).ThenByDescending(i => voices[i].episodes).First();
+
+                foreach (int i in group)
+                {
+                    if (i != main)
+                        names[i] = pass == 0 ? VoiceName(voices[i], voices[i].lang ?? "und") : $"{names[i]} #{voices[i].id}";
+                }
+            }
+        }
+
+        return names;
+    }
+
+    static string VoiceName(KinoPubVoice v, string lang)
+        => lang == null ? $"{v.name} ({v.codec})" : $"{v.name} ({v.codec}, {lang})";
     #endregion
 }
