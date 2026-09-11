@@ -1321,7 +1321,13 @@
           scroll.append(html);
         });
         if (serial && episodes.length > items.length && !params.similars) {
-          var left = episodes.slice(items.length);
+          // rows can have gaps (a voice missing in some episodes): pad only episodes after the last row
+          var last_episode = _this8.getLastEpisode(items);
+          var left = last_episode
+            ? episodes.filter(function (episode) {
+              return episode.episode_number > last_episode;
+            })
+            : episodes.slice(items.length);
           left.forEach(function (episode) {
             var info = [];
             if (episode.vote_average)
