@@ -428,14 +428,24 @@ public class KinoPubInvoke
 
                         if (episode.audios != null)
                         {
+                            // озвучки серии с теми же названиями, что и в списке озвучек hls
+                            var names = new List<string>(episode.audios.Length);
+
                             foreach (var audio in episode.audios)
                             {
-                                string a = audio.author?.title ?? audio.lang;
-                                if (a != null && !voicename.Contains(a) && a != "rus")
-                                    voicename += $"{a}, ";
+                                var (idt, name) = VoiceId(audio);
+                                if (string.IsNullOrEmpty(name))
+                                    continue;
+
+                                string alang = KnownLang(audio.lang);
+                                if (alang != null && alang != "rus" && !(idt == 6 && alang == "eng"))
+                                    name = $"{name} ({alang})";
+
+                                if (!names.Contains(name))
+                                    names.Add(name);
                             }
 
-                            voicename = Regex.Replace(voicename, "[, ]+$", "");
+                            voicename = string.Join(", ", names);
                         }
                         #endregion
 
