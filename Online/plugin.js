@@ -1142,9 +1142,12 @@
             element.qualitys = element.quality;
             element.quality = Lampa.Arrays.getKeys(element.quality)[0];
           }
+          // without a voice filter, providers with all voices in one stream send the episode voices in details
+          var info_text = voice_name == 'Неизвестно' && element.details ? element.details : voice_name;
+          var info_limit = info_text == voice_name ? 60 : 150;
           Lampa.Arrays.extend(element, {
             voice_name: voice_name,
-            info: voice_name.length > 60 ? voice_name.substr(0, 60) + '...' : voice_name,
+            info: info_text.length > info_limit ? info_text.substr(0, info_limit) + '...' : info_text,
             quality: '',
             time: Lampa.Utils.secondsToTime((episode ? episode.runtime : object.movie.runtime) * 60, true)
           });
